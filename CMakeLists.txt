@@ -1,4 +1,5 @@
-cmake_minimum_required(VERSION 3.11)
+cmake_minimum_required (VERSION 3.2)
+project (demo)
 
 project(
   seakv
@@ -10,7 +11,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/")
 
 set(CMAKE_CXX_STANDARD "17")
 
-option(WITH_DPDK "Enable DPDK messaging" OFF)
+option(WITH_DPDK "Enable DPDK messaging" ON)
 if(WITH_DPDK)
   find_package(dpdk)
   if(NOT DPDK_FOUND)
@@ -20,72 +21,91 @@ if(WITH_DPDK)
   set(HAVE_DPDK TRUE)
 endif()
 
-CMAKE_DEPENDENT_OPTION(WITH_SPDK "Enable SPDK" OFF
-  "CMAKE_SYSTEM_PROCESSOR MATCHES i386|i686|amd64|x86_64|AMD64|aarch64" OFF)
-if(WITH_SPDK)
-  if(NOT WITH_BLUESTORE)
-    message(SEND_ERROR "Please enable WITH_BLUESTORE for using SPDK")
-  endif()
-  include(BuildSPDK)
-  build_spdk()
-  set(HAVE_SPDK TRUE)
-endif(WITH_SPDK)
+include_directories(
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_SOURCE_DIR}/seastar/include
+    ${CMAKE_SOURCE_DIR}/dpdk/build/include
+    ${CMAKE_SOURCE_DIR}/spdk/include
+)
+link_directories(
+    ${CMAKE_SOURCE_DIR}/spdk/build/lib
+    ${CMAKE_SOURCE_DIR}/dpdk/build/lib
+)
 
 
+#[[
+#Seastar
+list(APPEND CMAKE_PREFIX_PATH 
+            ${SEASTAR_SOURCE_DIR}/build/release
+            ${SEASTAR_SOURCE_DIR}/build/release/_cooking/installed)
+list(APPEND CMAKE_MODULE_PATH 
+            ${SEASTAR_SOURCE_DIR}/cmake)
+find_package (Seastar REQUIRED)
 
-option(WITH_SEASTAR "Build seastar components" OFF)
-if(WITH_SEASTAR)
-  find_package(c-ares 1.13.0 QUIET)
-  if(NOT c-ares_FOUND)
-    message(STATUS "Could not find c-ares, will build it")
-    include(Buildc-ares)
-    build_c_ares()
-  endif()
-  macro(find_package name)
-    if(NOT TARGET ${name})
-      _find_package(${ARGV})
-    endif()
-  endmacro ()
-  set(Seastar_API_LEVEL "6" CACHE STRING "" FORCE)
-  set(Seastar_HWLOC OFF CACHE BOOL "" FORCE)
-  set(Seastar_STD_OPTIONAL_VARIANT_STRINGVIEW ON CACHE BOOL "" FORCE)
-  if(Seastar_DPDK)
-    find_package(dpdk QUIET)
-    if(NOT DPDK_FOUND)
-      include(BuildDPDK)
-      build_dpdk(${CMAKE_BINARY_DIR}/src/dpdk)
-    endif()
-  endif()
-  list(APPEND Seastar_CXX_FLAGS
-    "-DSEASTAR_NO_EXCEPTION_HACK"
-    "-Wno-error"
-    "-Wno-sign-compare"
-    "-Wno-attributes"
-    "-Wno-pessimizing-move"
-    "-Wno-address-of-packed-member"
-    "-Wno-non-virtual-dtor")
-  set(Seastar_CXX_FLAGS "${Seastar_CXX_FLAGS}" CACHE STRING "" FORCE)
-  add_subdirectory(seastar)
-  # create the directory so cmake won't complain when looking at the imported
-  # target: Seastar exports this directory created at build-time
-  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/seastar/gen/include")
-endif()
+add_executable(demo demo.cc)
 
-option(WITH_RDMA "Enable RDMA in async messenger" OFF)
-if(WITH_RDMA)
-  find_package(verbs REQUIRED)
-  set(HAVE_VERBS ${VERBS_FOUND})
-  find_package(rdmacm REQUIRED)
-  set(HAVE_RDMACM ${RDMACM_FOUND})
-  set(HAVE_RDMA TRUE)
-endif()
+#rollback to use sharedlib
+target_link_libraries (demo PRIVATE Seastar::seastar -lspdk -lspdk_env_dpdk -ldpdk)
 
-# Rocksdb
-option(WITH_SYSTEM_ROCKSDB "require and build with system rocksdb" OFF)
-if (WITH_SYSTEM_ROCKSDB)
-  find_package(RocksDB 5.14 REQUIRED)
-endif()
+#build Seastar+DPDK+SPDK outside, see install-dep.sh
+#Refer to ceph/cmake/modules/Build{SPDK/DPDK}.cmake
 
-add_executable(seakv main.cc)
+foreach(lib nvme env_dpdk log util)
+    add_library(spdk_${lib} STATIC IMPORTED)
+    set_target_properties(spdk_${lib} PROPERTIES IMPORTED_LOCATION "${SPDK_SOURCE_DIR}/build/lib/libspdk_${lib}.a"
+                          INTERFACE_INCLUDE_DIRECTORIES "${SPDK_SOURCE_DIR}/build/include")
+    target_link_libraries(demo PRIVATE  spdk_${lib})
+endforeach()
+
+#do not need when seastar with  -enable-dpdk
+list(APPEND dpdk_components
+	    bus_pci
+	    eal
+	    kvargs
+	    mbuf
+	    mempool
+	    mempool_ring
+	    pci
+ 	    ring
+	    telemetry
+        bus_vdev
+        cfgfile
+        hash
+        net
+        pmd_bnxt
+        pmd_cxgbe
+        pmd_e1000
+        pmd_ena
+        pmd_enic
+        pmd_i40e
+        pmd_ixgbe
+        pmd_nfp
+        pmd_qede
+        pmd_ring
+        pmd_sfc_efx
+        timer)
+
+ foreach(c ${dpdk_components})
+        add_library(dpdk::${c} STATIC IMPORTED)
+        set(dpdk_${c}_LIBRARY "${DPDK_SOURCE_DIR}/build/lib/librte_${c}.a")
+        set_target_properties(dpdk::${c} PROPERTIES INTERFACE_INCLUDE_DIRECTORIES ${SPDK_SOURCE_DIR}/dpdk/build/include
+                             IMPORTED_LOCATION "${dpdk_${c}_LIBRARY}")
+        list(APPEND DPDK_LIBRARIES dpdk::${c})
+        list(APPEND DPDK_ARCHIVES "${dpdk_${c}_LIBRARY}")
+  endforeach()
+
+add_library(dpdk::dpdk INTERFACE IMPORTED)
+add_dependencies(dpdk::dpdk ${DPDK_LIBRARIES})
+set_target_properties(dpdk::dpdk PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES ${DPDK_INCLUDE_DIR}
+    INTERFACE_LINK_LIBRARIES
+    "-Wl,--whole-archive $<JOIN:${DPDK_ARCHIVES}, > -Wl,--no-whole-archive -Wl,-lnuma -Wl,-lpthread,-ldl")
 
 
+set_target_properties(spdk_env_dpdk PROPERTIES INTERFACE_LINK_LIBRARIES "dpdk::dpdk;rt")
+set_target_properties(spdk_util PROPERTIES INTERFACE_LINK_LIBRARIES uuid)
+
+
+target_link_libraries (demo PRIVATE Seastar::seastar)
+]]
