@@ -21,6 +21,7 @@ if(WITH_DPDK)
   set(HAVE_DPDK TRUE)
 endif()
 
+#[[
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}
@@ -34,7 +35,6 @@ link_directories(
 )
 
 
-#[[
 #Seastar
 list(APPEND CMAKE_PREFIX_PATH 
             ${SEASTAR_SOURCE_DIR}/build/release
